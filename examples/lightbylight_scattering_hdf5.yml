@@ -1,0 +1,24 @@
+---
+control:
+  dt_multiplier: 0.1
+  rng_seed: 1234
+
+laser:
+  a0: 10.0
+  wavelength: 0.8 * micro
+  waist: 3.0 * micro
+  fwhm_duration: 30.0 * femto
+
+beam:
+  ne: 100000
+  gamma: 0.7 * GeV / (m * c^2)
+  radius: [2.0 * micro, normally_distributed]
+  length: 3.0 * micro
+  collision_angle: 0.0
+
+output:
+  dump_all_particles: hdf5
+  coordinate_system: beam
+  electron: [energy]
+  photon: [energy]
+

@@ -10,6 +10,7 @@
 
 # Ignore output from examples
 /examples/*
+!/examples/*.py
 !/examples/*.yaml
 !/examples/*.yml
 
