@@ -24,7 +24,7 @@ def main():
     args = parser.parse_args()
     xiInput = args.xi
     
-    storage   = "rootFiles"
+    storage   = "/Users/arkasantra/arka/Tom_Work_Theory/Plotting/rootFiles"
 
     p         = subprocess.Popen("mkdir -p "+storage, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     out, err  = p.communicate()
