@@ -1,14 +1,55 @@
 //! MPI-aware data binning and histogram generation
 
-use std::fmt;
+use std::{fmt, io::BufWriter};
+use std::fs::File;
+use std::io::Write;
+
+/// Writer that keeps track of how many bytes it's written.
+/// A single write! call will never write more than `limit` bytes.
+struct WriteCounter<W: Write> {
+    inner: W,
+    limit: usize,
+    count: usize,
+}
+
+impl<W> WriteCounter<W> where W: Write {
+    fn new(inner: W, limit: usize) -> Self {
+        Self {inner, limit, count: 0}
+    }
+
+    fn bytes_written(&self) -> usize {
+        self.count
+    }
+
+    /// Writes the given bytes, ignoring the limit set.
+    fn write_unchecked(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let res = self.inner.write(buf);
+        if let Ok(count) = res {
+            self.count += count;
+        }
+        res
+    }
+}
+
+impl<W> Write for WriteCounter<W> where W: Write {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let end = buf.len().min(self.limit);
+        let res = self.inner.write(&buf[..end]);
+        if let Ok(count) = res {
+            self.count += count;
+        }
+        res
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
 
 #[cfg(feature = "with-mpi")]
 use mpi::{traits::*, collective::SystemOperation};
 #[cfg(not(feature = "with-mpi"))]
-use crate::no_mpi::*;
-
-#[cfg(feature = "fits-output")]
-use fitsio::*;
+use no_mpi::*;
 
 #[derive(Copy,Clone,PartialEq)]
 pub enum BinSpec {
@@ -106,12 +147,12 @@ impl fmt::Display for Histogram {
     }
 }
 
-fn min_max_by<T>(base: &[T], f: &impl Fn(&T) -> f64, wrapper: impl Fn(f64) -> f64) -> Option<(f64, f64)> {
+fn min_max_by<T>(base: &[T], f: &impl Fn(&T) -> f64, filter: &impl Fn(&T) -> bool, wrapper: impl Fn(f64) -> f64) -> Option<(f64, f64)> {
     let mut min: Option<f64> = None;
     let mut max: Option<f64> = None;
     for t in base.iter() {
         let v = wrapper(f(t));
-        if v.is_finite() {
+        if v.is_finite() && filter(t) {
             min = min.map_or(Some(v), |x| Some(x.min(v)));
             max = max.map_or(Some(v), |x| Some(x.max(v)));
         }
@@ -168,6 +209,7 @@ impl Histogram {
     pub fn generate_1d<T>(
         comm: &impl Communicator,
         base: &[T], accessor: &impl Fn(&T) -> f64, weight: &impl Fn(&T) -> f64,
+        filter: &impl Fn(&T) -> bool,
         name: &str, unit: &str,
         bspec: BinSpec, hspec: HeightSpec) -> Option<Histogram> {
         //let rank = comm.rank();
@@ -175,9 +217,9 @@ impl Histogram {
         // Local min and max
         // Adjust for log-scaling!
         let (min, max) = if bspec == BinSpec::LogScaled {
-            min_max_by(base, accessor, f64::ln).unwrap_or((std::f64::MAX, -std::f64::MAX))
+            min_max_by(base, accessor, filter, f64::ln).unwrap_or((std::f64::MAX, -std::f64::MAX))
         } else {
-            min_max_by(base, accessor, std::convert::identity).unwrap_or((std::f64::MAX, -std::f64::MAX))
+            min_max_by(base, accessor, filter, std::convert::identity).unwrap_or((std::f64::MAX, -std::f64::MAX))
         };
         //let min = base.iter().map(accessor).min_by(|a,b| a.partial_cmp(b).unwrap() ).unwrap_or(std::f64::MAX);
         //let max = base.iter().map(accessor).max_by(|a,b| a.partial_cmp(b).unwrap() ).unwrap_or(-std::f64::MAX);
@@ -232,6 +274,10 @@ impl Histogram {
                 continue;
             }
 
+            if !filter(e) {
+                continue;
+            }
+
             // adjust weight to include actual size of bin / log-scaled size
             let w = if bspec == BinSpec::LogScaled && (hspec == HeightSpec::Density || hspec == HeightSpec::ProbabilityDensity) {
                 w * bin_vol / linear_bin_vol(gmin, bin_vol, bin)
@@ -280,6 +326,7 @@ impl Histogram {
     pub fn generate_2d<T>(
         comm: &impl Communicator,
         base: &[T], fx: &impl Fn(&T) -> f64, fy: &impl Fn(&T) -> f64, weight: &impl Fn(&T) -> f64,
+        filter: &impl Fn(&T) -> bool,
         name: [&str; 2], unit: [&str; 2],
         bspec: [BinSpec; 2], hspec: HeightSpec) -> Option<Histogram> {
         //let rank = comm.rank();
@@ -287,15 +334,15 @@ impl Histogram {
         // Local min and max
 
         let (xmin, xmax) = if bspec[0] == BinSpec::LogScaled {
-            min_max_by(base, fx, f64::ln).unwrap_or((std::f64::MAX, -std::f64::MAX))
+            min_max_by(base, fx, filter, f64::ln).unwrap_or((std::f64::MAX, -std::f64::MAX))
         } else {
-            min_max_by(base, fx, std::convert::identity).unwrap_or((std::f64::MAX, -std::f64::MAX))
+            min_max_by(base, fx, filter, std::convert::identity).unwrap_or((std::f64::MAX, -std::f64::MAX))
         };
 
         let (ymin, ymax) = if bspec[1] == BinSpec::LogScaled {
-            min_max_by(base, fy, f64::ln).unwrap_or((std::f64::MAX, -std::f64::MAX))
+            min_max_by(base, fy, filter, f64::ln).unwrap_or((std::f64::MAX, -std::f64::MAX))
         } else {
-            min_max_by(base, fy, std::convert::identity).unwrap_or((std::f64::MAX, -std::f64::MAX))
+            min_max_by(base, fy, filter, std::convert::identity).unwrap_or((std::f64::MAX, -std::f64::MAX))
         };
 
         let min = [xmin, ymin];
@@ -340,6 +387,10 @@ impl Histogram {
 
             if value.iter().any(|&x| !x.is_finite()) {
                 continue; // all of value[i] must be finite
+            }
+
+            if !filter(e) {
+                continue;
             }
 
             let bin = [
@@ -395,54 +446,87 @@ impl Histogram {
     }
 
     /// Writes the histogram to file.
-    /// The format of that file will be FITS if the "fits-output"
-    /// feature is enabled, otherwise it will be plain-text data.
     /// The relevant extension is added to `filename`.
-    #[cfg(feature = "fits-output")]
-    pub fn write(&self, filename: &str) -> Result<(),errors::Error> {
-        use fitsio::images::{ImageDescription, ImageType};
-        let desc = ImageDescription {
-            data_type: ImageType::Double,
-            dimensions: &self.bins[..],
-        };
-        let filename = format!("!{}.fits", filename);
-        let mut file = FitsFile::create(filename).with_custom_primary(&desc).open()?;
-        let hdu = file.hdu(0)?;
+    pub fn write_fits(&self, filename: &str) -> std::io::Result<()> {
+        let filename = filename.to_owned() + ".fits";
+        let file = File::create(&filename)?;
+        let file = BufWriter::new(file);
+        let mut file = WriteCounter::new(file, 80);
+        let naxis = self.dim;
 
-        // Write metadata
-        for i in 0..self.dim {
-            hdu.write_key(&mut file, &format!("CRPIX{}", i+1), 1.0)?; // pixel centre
-            hdu.write_key(&mut file, &format!("CRVAL{}", i+1), self.min[i] + 0.5 * self.bin_sz[i])?;
-            hdu.write_key(&mut file, &format!("CDELT{}", i+1), self.bin_sz[i])?;
-            hdu.write_key(&mut file, &format!("CNAME{}", i+1), &self.axis[i][..])?;
-            hdu.write_key(&mut file, &format!("CUNIT{}", i+1), &self.unit[i][..])?;
+        // Write header information
+        write!(file, "SIMPLE  = {:>20} / {:<47}", 'T', "file conforms to FITS standard")?;
+        write!(file, "BITPIX  = {:>20} / {:<47}", -64, "number of bits per data pixel")?;
+        write!(file, "NAXIS   = {:>20} / {:<47}", naxis, "number of data axes")?;
+
+        for n in 1..=naxis {
+            write!(file, "NAXIS{:<3}= {:>20} / {:<47}", n, self.bins[n-1], "number of pixels along this axis")?;
         }
 
-        hdu.write_key(&mut file, "BUNIT", &self.bunit[..])?;
-        hdu.write_key(&mut file, "TOTAL", self.total)?;
-        hdu.write_key(&mut file, "RAWTOTAL", self.unweighted_total)?;
-        hdu.write_key(&mut file, "OBJECT", &self.name[..])?;
+        write!(file, "EXTEND  = {:>20} / {:<47}", 'T', "dataset may contain extensions")?;
 
-        let min = self.cts.iter().min_by(|a,b| a.partial_cmp(b).unwrap()).unwrap_or(&0.0);
-        let max = self.cts.iter().max_by(|a,b| a.partial_cmp(b).unwrap()).unwrap_or(&0.0);
-        hdu.write_key(&mut file, "DATAMIN", *min)?;
-        hdu.write_key(&mut file, "DATAMAX", *max)?;
+        for n in 1..=naxis {
+            // 0.5 => left aligned, 1.0 => centred
+            write!(file, "CRPIX{:<3}= {:>20.9E}{:<50}", n, 0.5, "")?;
+            write!(file, "CRVAL{:<3}= {:>20.9E}{:<50}", n, self.min[n-1], "")?;
+            write!(file, "CDELT{:<3}= {:>20.9E}{:<50}", n, self.bin_sz[n-1], "")?;
+            write!(file, "CNAME{:<3}= '{}'{:<3$}", n, self.axis[n-1], "", 80 - 12 - self.axis[n-1].len())?;
+            write!(file, "CUNIT{:<3}= '{}'{:<3$}", n, self.unit[n-1], "", 80 - 12 - self.unit[n-1].len())?;
+        }
 
-        //Write data
-        hdu.write_image(&mut file, &self.cts[..])?;
+        write!(file, "BUNIT   = '{}'{:<2$}", self.bunit, "", 80 - 12 - self.bunit.len())?;
+        write!(file, "TOTAL   = {:>20.9E}{:<50}", self.total, "")?;
+        write!(file, "UWTOTAL = {:>20.9E}{:<50}", self.unweighted_total, "")?;
+        write!(file, "OBJECT  = '{}'{:<2$}", self.name, "", 80 - 12 - self.name.len())?;
+
+        if !self.cts.is_empty() {
+            let mut min = self.cts[0];
+            let mut max = min;
+            for elem in self.cts.iter() {
+                if *elem < min {
+                    min = *elem;
+                } else if *elem > max {
+                    max = *elem;
+                }
+            }
+            write!(file, "DATAMIN = {:>20.9E}{:<50}", min, "")?;
+            write!(file, "DATAMAX = {:>20.9E}{:<50}", max, "")?;
+        }
+
+        let version = env!("CARGO_PKG_VERSION");
+        let sha = env!("VERGEN_GIT_SHA_SHORT");
+        write!(file, "COMMENT   Generated by Ptarmigan v{} ({:<7}){:<3$}", version, sha, "", 80 - 37 - version.len() - sha.len())?;
+        write!(file, "{:80}", "END")?;
+
+        // Header padding
+        let count = file.bytes_written();
+        assert_eq!(count % 80, 0);
+        if count < 2880 {
+            let padding = vec![b' '; 2880 - count];
+            file.write_unchecked(&padding)?;
+        }
+        assert_eq!(file.bytes_written(), 2880);
+
+        for elem in self.cts.iter() {
+            // FITS standard requires big-endian
+            let raw = elem.to_be_bytes();
+            file.write_unchecked(&raw)?;
+        }
+
+        // Padding
+        let count = file.bytes_written();
+        let excess = count % 2880; // how far we wrote into the next block
+        if excess > 0 {
+            let padding = vec![0; 2880 - excess];
+            file.write_unchecked(&padding)?;
+        }
 
         Ok(())
     }
 
     /// Writes the histogram to file.
-    /// The format of that file will be FITS if the "fits-output"
-    /// feature is enabled, otherwise it will be plain-text data.
     /// The relevant extension is added to `filename`.
-    #[cfg(not(feature = "fits-output"))]
-    pub fn write(&self, filename: &str) -> std::io::Result<()> {
-        use std::fs::File;
-        use std::io::Write;
-
+    pub fn write_plain_text(&self, filename: &str) -> std::io::Result<()> {
         let filename = format!("{}.dat", filename);
         let mut file = File::create(filename)?;
 
@@ -489,7 +573,7 @@ mod tests {
     #[cfg(feature = "with-mpi")]
     use mpi::environment::Universe;
     #[cfg(not(feature = "with-mpi"))]
-    use crate::no_mpi as mpi;
+    extern crate no_mpi as mpi;
 
     static mut UNIVERSE: Option<Universe> = None;
 
@@ -510,11 +594,12 @@ mod tests {
         let fx = Box::new(|pt: &[f64; 3]| pt[0]) as Accessor<[f64; 3]>;
         let fy = Box::new(|pt: &[f64; 3]| pt[1]) as Accessor<[f64; 3]>;
         let weight = |_pt: &[f64; 3]| 1.0;
-        let hgram = Histogram::generate_2d(&world, &data, &fx, &fy, &weight, ["x", "y"], ["1", "1"], [BinSpec::Automatic; 2], HeightSpec::Density);
+        let filter = |_pt: &[f64; 3]| true;
+        let hgram = Histogram::generate_2d(&world, &data, &fx, &fy, &weight, &filter, ["x", "y"], ["1", "1"], [BinSpec::Automatic; 2], HeightSpec::Density);
         assert!(hgram.is_some());
         let hgram = hgram.unwrap();
         println!("hgram = {}", hgram);
-        let status = hgram.write("!output/single_point");
+        let status = hgram.write_fits("output/single_point");
         println!("status = {:?}", status);
         assert!(status.is_ok());
     }
@@ -536,11 +621,12 @@ mod tests {
         let fx = Box::new(|pt: &[f64; 3]| pt[0]) as Accessor<[f64; 3]>;
         let fy = Box::new(|pt: &[f64; 3]| pt[1]) as Accessor<[f64; 3]>;
         let weight = |_pt: &[f64; 3]| 1.0;
-        let hgram = Histogram::generate_2d(&world, &data, &fx, &fy, &weight, ["x", "y"], ["1", "1"], [BinSpec::LogScaled; 2], HeightSpec::Density);
+        let filter = |_pt: &[f64; 3]| true;
+        let hgram = Histogram::generate_2d(&world, &data, &fx, &fy, &weight, &filter, ["x", "y"], ["1", "1"], [BinSpec::LogScaled; 2], HeightSpec::Density);
         assert!(hgram.is_some());
         let hgram = hgram.unwrap();
         println!("hgram = {}", hgram);
-        let status = hgram.write("!output/single_point_log");
+        let status = hgram.write_fits("output/single_point_log");
         println!("status = {:?}", status);
         assert!(status.is_ok());
     }
@@ -562,7 +648,8 @@ mod tests {
         let fx = Box::new(|pt: &[f64; 3]| pt[0]) as Accessor<[f64; 3]>;
         let fy = Box::new(|pt: &[f64; 3]| pt[1]) as Accessor<[f64; 3]>;
         let weight = |_pt: &[f64; 3]| 1.0;
-        let hgram = Histogram::generate_2d(&world, &data, &fx, &fy, &weight, ["x", "y"], ["1", "1"], [BinSpec::Automatic; 2], HeightSpec::Density);
+        let filter = |_pt: &[f64; 3]| true;
+        let hgram = Histogram::generate_2d(&world, &data, &fx, &fy, &weight, &filter, ["x", "y"], ["1", "1"], [BinSpec::Automatic; 2], HeightSpec::Density);
         assert!(hgram.is_none());
     }
 }

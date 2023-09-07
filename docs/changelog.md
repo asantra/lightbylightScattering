@@ -1,8 +1,177 @@
 # Changelog
 
+## v1.3.2
+
+2023-05-23
+
+Fixed:
+
+* Failure to set automatic pair rate increase when out of tabulated range.
+
+## v1.3.1
+
+2023-05-17
+
+Added:
+
+* Photon-polarization dependence of pair creation rates.
+* Input file parsing: variables in the `constants` block can depend on previously defined variables.
+* Evaluate and print math expressions in stats file (PR #46).
+* Circular statistics (PR #47).
+
+Fixed:
+
+* Vulnerabilities reported by Dependabot.
+* Warning about deprecated code in nom 1.2.4.
+* Rate ceiling at large harmonic order (NLC, LP)
+
+## v1.2.1
+
+2023-01-23
+
+Added:
+
+* Looping over a range of a0s (PR #45).
+
+Fixed:
+
+* Incorrect sampling of LCFA pair-creation spectrum (evident only for chi > 2).
+
+## v1.1.0
+
+2023-01-13
+
+Added:
+
+* Modified (quantum-corrected) classical RR.
+* Faster photon generation in CP backgrounds, under LMA.
+
+Fixed:
+
+* Error messages.
+
+## v1.0.0
+
+2022-12-01
+
+Added:
+
+* Classical radiation reaction.
+* Choice of laser temporal envelope.
+* Range cuts to distribution output.
+* More detailed naming of FITS output files.
+
+Fixed:
+
+* Upgraded to mpi v0.6.
+* Compile error for HDF5 versions < 1.10.
+* Incorrect unit conversion.
+
+Removed:
+
+* Requirement to specify beam radius (default is zero).
+
+## v0.11.3
+
+2022-07-25
+
+Fixed:
+
+* Sanity check during generation of NLC photon momentum.
+
+## v0.11.2
+
+2022-07-13
+
+Fixed:
+
+* Empty (zero-length) datasets are not skipped when generating HDF5 output.
+
+## v0.11.1
+
+2022-07-07
+
+Added:
+
+* Optional discard of photons that have not pair-created, controlled by input file setting `discard_background`.
+
+Fixed:
+
+* Momentum sampling under LMA at finite collision angle.
+
+## v0.11.0
+
+2022-06-23
+
+Added:
+
+* Particle-beam transverse profile can be given by a truncated normal distribution.
+* Parallelized HDF5 output.
+
+Fixed:
+
+* Building against OpenMPI v4.0+.
+
+Removed:
+
+* Plain-text output of complete particle data.
+* `circular` as default choice of laser polarization; must be given explicitly.
+
+## v0.10.1
+
+2022-06-15
+
+Fixed:
+
+* Unnecessary warning about energy chirp when running with incident photons.
+* Loss of precision in calculating ArcCos which led to particles || to primary being incorrectly discarded.
+
+## v0.10.0
+
+2022-06-10
+
+Added:
+
+* Photon-polarization-resolved emission rates, LMA (LP and CP) and LCFA.
+* Nonlinear Breit-Wheeler pair creation for photons in LP lasers, using LMA.
+* Output routines for Stokes parameters and polarization-weighted distributions.
+* Energy chirping of incident particle beam.
+* Early stopping at chosen time.
+
+Fixed:
+
+* Time-centering in particle push.
+* Initialisation of beam with non-zero offset.
+* Rate ceiling calculation for NLC (LP)
+
+## v0.9.1
+
+2022-04-13
+
+Added:
+
+* Nonlinear Compton scattering in linearly polarized backgrounds.
+* Data attributes (units and description) in HDF-formatted output.
+* Output specifiers `r_{x,y}` and option to filter out particles by angle.
+* Runtime choice of file format for distribution output (plain text or FITS).
+* More example input files.
+
+Fixed:
+
+* LMA photon sampling for non-zero collision angle.
+
+Removed:
+
+* Plain-text output of complete particle data (re-enabled by compiling with feature `enable-plain-text-dump`).
+* `fits-output` feature. FITS output can be selected via the input file.
+
+To be removed:
+
+* `circular` as default choice of polarization
+
 ## v0.8.3
 
-In progress.
+2021-11-02
 
 Fixed:
 

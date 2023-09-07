@@ -1,8 +1,8 @@
-use std::f64::consts;
 use rand::prelude::*;
 use rand_distr::{Exp1, StandardNormal};
-use crate::geometry::{ThreeVector, FourVector};
+use crate::geometry::{ThreeVector, FourVector, StokesVector};
 use super::{Species, Particle};
+use super::dstr::RadialDistribution;
 
 #[derive(Copy,Clone)]
 pub struct BeamBuilder {
@@ -14,15 +14,14 @@ pub struct BeamBuilder {
     sigma: f64,
     gamma_min: f64,
     gamma_max: f64,
-    normally_distributed: bool,
-    sigma_x: f64,
-    sigma_y: f64,
+    radial_dstr: RadialDistribution,
     sigma_z: f64,
-    r_max: f64,
+    energy_chirp: f64,
     angle: f64,
     rms_div: f64,
     initial_z: f64,
     offset: ThreeVector,
+    pol: StokesVector,
 }
 
 impl BeamBuilder {
@@ -36,15 +35,14 @@ impl BeamBuilder {
             sigma: 0.0,
             gamma_min: 0.0,
             gamma_max: 0.0,
-            normally_distributed: true,
-            sigma_x: 0.0,
-            sigma_y: 0.0,
+            radial_dstr: RadialDistribution::Uniform {r_max: 0.0},
             sigma_z: 0.0,
-            r_max: 0.0,
+            energy_chirp: 0.0,
             angle: 0.0,
             rms_div: 0.0,
             initial_z,
             offset: ThreeVector::new(0.0, 0.0, 0.0),
+            pol: StokesVector::unpolarized(),
         }
     }
 
@@ -89,17 +87,21 @@ impl BeamBuilder {
 
     pub fn with_normally_distributed_xy(&self, sigma_x: f64, sigma_y: f64) -> Self {
         BeamBuilder {
-            normally_distributed: true,
-            sigma_x,
-            sigma_y,
+            radial_dstr: RadialDistribution::Normal { sigma_x, sigma_y },
+            ..*self
+        }
+    }
+
+    pub fn with_trunc_normally_distributed_xy(&self, sigma_x: f64, sigma_y: f64, x_max: f64, y_max: f64) -> Self {
+        BeamBuilder {
+            radial_dstr: RadialDistribution::TruncNormal { sigma_x, sigma_y, x_max, y_max },
             ..*self
         }
     }
 
     pub fn with_uniformly_distributed_xy(&self, r_max: f64) -> Self {
         BeamBuilder {
-            normally_distributed: false,
-            r_max,
+            radial_dstr: RadialDistribution::Uniform { r_max },
             ..*self
         }
     }
@@ -112,9 +114,22 @@ impl BeamBuilder {
     }
 
     pub fn with_offset(&self, offset: ThreeVector) -> Self {
-        let offset = ThreeVector::new(-offset[0], offset[1], -offset[2]);
         BeamBuilder {
             offset,
+            ..*self
+        }
+    }
+
+    pub fn with_energy_chirp(&self, rho: f64) -> Self {
+        BeamBuilder {
+            energy_chirp: rho,
+            ..*self
+        }
+    }
+
+    pub fn with_polarization(&self, sv: StokesVector) -> Self {
+        BeamBuilder {
+            pol: sv,
             ..*self
         }
     }
@@ -123,30 +138,19 @@ impl BeamBuilder {
         let normal_espec = self.normal_espec.expect("primary energy spectrum not specified");
         (0..self.num).into_iter()
             .map(|i| {
-                let t = -self.initial_z;
-                let z = self.initial_z + self.sigma_z * rng.sample::<f64,_>(StandardNormal);
-                let (x, y) = if self.normally_distributed {
-                    (
-                        self.sigma_x * rng.sample::<f64,_>(StandardNormal),
-                        self.sigma_y * rng.sample::<f64,_>(StandardNormal)
-                    )
-                } else { // uniformly distributed
-                    let r = self.r_max * rng.gen::<f64>().sqrt();
-                    let theta = 2.0 * consts::PI * rng.gen::<f64>();
-                    (r * theta.cos(), r * theta.sin())
-                };
-
-                let r = ThreeVector::new(x, y, z);
-                let r = r + self.offset;
-                let r = r.rotate_around_y(self.angle);
-                let r = FourVector::new(t, r[0], r[1], r[2]);
-
                 // Sample gamma from relevant distribution
-                let gamma = if normal_espec {
+                let (gamma, dz) = if normal_espec {
                     loop {
-                        let gamma = self.gamma + self.sigma * rng.sample::<f64,_>(StandardNormal);
+                        // for correlated gamma and z
+                        let rho = -self.energy_chirp;
+                        let n0 = rng.sample::<f64,_>(StandardNormal);
+                        let n1 = rng.sample::<f64,_>(StandardNormal);
+                        let n2 = rho * n0 + (1.0 - rho * rho).sqrt() * n1;
+
+                        let dz = self.sigma_z * n0;
+                        let gamma = self.gamma + self.sigma * n2;
                         if gamma > 1.0 {
-                            break gamma;
+                            break (gamma, dz);
                         }
                     }
                 } else { // brem spec
@@ -160,7 +164,9 @@ impl BeamBuilder {
                             break x;
                         }
                     };
-                    x * self.gamma_max
+
+                    let dz = self.sigma_z * rng.sample::<f64,_>(StandardNormal);
+                    (x * self.gamma_max, dz)
                 };
 
                 let u = match self.species {
@@ -176,8 +182,24 @@ impl BeamBuilder {
                     Species::Photon => FourVector::lightlike(u * theta_x.sin() * theta_y.cos(), u * theta_y.sin(), u * theta_x.cos() * theta_y.cos()),
                 };
 
+                let (t, z) = if self.offset[2] >= 0.0 {
+                    // beam is further away
+                    (-self.initial_z, self.initial_z + self.offset[2] + dz)
+                } else {
+                    // beam is closer to focal plane, push backwards
+                    (-self.initial_z - self.offset[2].abs(), self.initial_z + dz)
+                };
+
+                let (x, y) = self.radial_dstr.sample(rng);
+
+                let (x, y) = (x + self.offset[0], y + self.offset[1]);
+                let r = ThreeVector::new(x, y, z);
+                let r = r.rotate_around_y(self.angle);
+                let r = FourVector::new(t, r[0], r[1], r[2]);
+
                 Particle::create(self.species, r)
                     .with_normalized_momentum(u)
+                    .with_polarization(self.pol)
                     .with_optical_depth(rng.sample(Exp1))
                     .with_weight(self.weight)
                     .with_id(i as u64)
